@@ -1,86 +1,176 @@
+diff --git a/src/libs/Environment/Environment.ts b/src/libs/Environment/Environment.ts
+index 3b025cd6..99268e70 100644
+--- a/src/libs/Environment/Environment.ts
++++ b/src/libs/Environment/Environment.ts
+@@ -53,6 +53,46 @@ function getEnvironmentURL(): Promise<string> {
+     });
+ }
+ 
++/**
++ * Whether a build config value names a real environment. Config values come from the .env file baked into the bundle,
++ * so an unexpected value falls back to production instead of indexing the URL map with it.
++ */
++function isEnvironment(environment: string): environment is Environment {
++    return Object.values(CONST.ENVIRONMENT).some((knownEnvironment) => knownEnvironment === environment);
++}
++
++/**
++ * The environment that can be known synchronously from the build config, without waiting on the native beta bridge.
++ * It is read straight from the URL map, so the seed origin equals the live environment URL on every build whose
++ * environment is baked in: development, adhoc, staging and QA configs all resolve from the map, matching what the
++ * async lookup returns for them. The one case the config cannot decide is a native store build, where staging and
++ * production ship the same binary and only the beta check tells them apart: those builds bake ENVIRONMENT=production,
++ * so they report production here, in parity with EnvironmentContextProvider's default, and the async lookup corrects
++ * a TestFlight build to staging once it resolves.
++ */
++function getCurrentEnvironment(): Environment {
++    const environment = Config?.ENVIRONMENT ?? CONST.ENVIRONMENT.DEV;
++    if (isEnvironment(environment)) {
++        return environment;
++    }
++    return CONST.ENVIRONMENT.PRODUCTION;
++}
++
++/**
++ * Get the environment URL synchronously from the build config. Use this to seed module-level URLs so links built
++ * before the async lookup resolves already point at the right origin on every build.
++ */
++function getCurrentEnvironmentURL(): string {
++    return ENVIRONMENT_URLS[getCurrentEnvironment()];
++}
++
++/**
++ * Get the corresponding oldDot URL synchronously from the build config, with the same fallback as getCurrentEnvironmentURL.
++ */
++function getCurrentOldDotEnvironmentURL(): string {
++    return OLDDOT_ENVIRONMENT_URLS[getCurrentEnvironment()];
++}
++
+ /**
+  * Given the environment get the corresponding oldDot URL
+  */
+@@ -67,4 +107,4 @@ function getOldDotEnvironmentURL(): Promise<string> {
+     return getEnvironment().then((environment) => OLDDOT_ENVIRONMENT_URLS[environment]);
+ }
+ 
+-export {isInternalTestBuild, isDevelopment, isProduction, getEnvironmentURL, getOldDotEnvironmentURL, getOldDotURLFromEnvironment};
++export {isInternalTestBuild, isDevelopment, isProduction, getEnvironmentURL, getCurrentEnvironmentURL, getOldDotEnvironmentURL, getCurrentOldDotEnvironmentURL, getOldDotURLFromEnvironment};
 diff --git a/src/libs/ModifiedExpenseMessage.ts b/src/libs/ModifiedExpenseMessage.ts
-index 3f5f7668..f2dc1859 100644
+index 3f5f7668..b259b072 100644
 --- a/src/libs/ModifiedExpenseMessage.ts
 +++ b/src/libs/ModifiedExpenseMessage.ts
-@@ -26,7 +26,10 @@ import {getPolicyName, getRootParentReport, isPolicyExpenseChat, isSelfDM} from
+@@ -15,7 +15,7 @@ import isEmpty from 'lodash/isEmpty';
+ 
+ import {getDecodedCategoryName, isCategoryMissing} from './CategoryUtils';
+ import DateUtils from './DateUtils';
+-import {getEnvironmentURL} from './Environment/Environment';
++import {getCurrentEnvironmentURL, getEnvironmentURL} from './Environment/Environment';
+ import {formatList} from './Localize';
+ import Log from './Log';
+ import {arePolicyRulesEnabled, findVendorByID, getCleanedTagName, getCommaSeparatedTagNameWithSanitizedColons, getSortedTagKeys, isPolicyAdmin} from './PolicyUtils';
+@@ -26,7 +26,11 @@ import {getPolicyName, getRootParentReport, isPolicyExpenseChat, isSelfDM} from
  import {getFormattedAttendees, getTagArrayFromName} from './TransactionUtils';
  import {isInvalidMerchantValue} from './ValidationUtils';
  
 -let environmentURL: string;
-+// The environment URL is resolved asynchronously on native, so default to the production
-+// URL until the lookup settles. Otherwise messages built at cold start render links with
-+// an "undefined" origin, which logs "Error parsing URL" when parsed.
-+let environmentURL: string = CONST.NEW_EXPENSIFY_URL;
++// The environment URL is resolved asynchronously on native, so seed it synchronously from the build config instead of
++// defaulting to production: development and adhoc builds link to their own origin from the first render, while store
++// builds still fall back to production until the lookup settles. Otherwise messages built at cold start render links
++// with an "undefined" origin, which logs "Error parsing URL" when parsed.
++let environmentURL: string = getCurrentEnvironmentURL();
  getEnvironmentURL().then((url: string) => (environmentURL = url));
  
  /**
 diff --git a/src/libs/Navigation/helpers/getReportURLForCurrentContext.ts b/src/libs/Navigation/helpers/getReportURLForCurrentContext.ts
-index ec2670b0..e8f3c9ff 100644
+index ec2670b0..6c571a2b 100644
 --- a/src/libs/Navigation/helpers/getReportURLForCurrentContext.ts
 +++ b/src/libs/Navigation/helpers/getReportURLForCurrentContext.ts
 @@ -1,11 +1,15 @@
- import {getEnvironmentURL} from '@libs/Environment/Environment';
+-import {getEnvironmentURL} from '@libs/Environment/Environment';
++import {getCurrentEnvironmentURL, getEnvironmentURL} from '@libs/Environment/Environment';
  import Navigation from '@libs/Navigation/Navigation';
  
-+import CONST from '@src/CONST';
  import ROUTES from '@src/ROUTES';
  
  import isSearchTopmostFullScreenRoute from './isSearchTopmostFullScreenRoute';
  
 -let environmentURL: string;
-+// The environment URL is resolved asynchronously on native, so default to the production
-+// URL until the lookup settles. Otherwise report links built at cold start render with
-+// an "undefined" origin, which logs "Error parsing URL" when the message HTML is parsed.
-+let environmentURL: string = CONST.NEW_EXPENSIFY_URL;
++// The environment URL is resolved asynchronously on native, so seed it synchronously from the build config instead of
++// defaulting to production: development and adhoc builds link to their own origin from the first render, while store
++// builds still fall back to production until the lookup settles. Otherwise report links built at cold start render
++// with an "undefined" origin, which logs "Error parsing URL" when the message HTML is parsed.
++let environmentURL: string = getCurrentEnvironmentURL();
  getEnvironmentURL().then((url: string) => (environmentURL = url));
  
  // Static part of the search report path (everything before the first route param), used to detect sibling search-report routes.
 diff --git a/src/libs/ReportActionsUtils.ts b/src/libs/ReportActionsUtils.ts
-index 606d93c3..e90ff27c 100644
+index 606d93c3..5962eae6 100644
 --- a/src/libs/ReportActionsUtils.ts
 +++ b/src/libs/ReportActionsUtils.ts
-@@ -172,10 +172,13 @@ Onyx.connectWithoutView({
+@@ -63,7 +63,7 @@ import {getDecodedCategoryName} from './CategoryUtils';
+ import {convertAmountToDisplayString, convertToBackendAmount, convertToShortDisplayString} from './CurrencyUtils';
+ import DateUtils from './DateUtils';
+ import {getFormattedDistanceInUnits} from './DistanceDisplayUtils';
+-import {getEnvironmentURL, getOldDotEnvironmentURL} from './Environment/Environment';
++import {getCurrentEnvironmentURL, getCurrentOldDotEnvironmentURL, getEnvironmentURL, getOldDotEnvironmentURL} from './Environment/Environment';
+ import getBase62ReportID from './getBase62ReportID';
+ import {isReportMessageAttachment} from './isReportMessageAttachment';
+ import {toLocaleOrdinal} from './LocaleDigitUtils';
+@@ -172,10 +172,14 @@ Onyx.connectWithoutView({
      },
  });
  
 -let environmentURL: string;
-+// The environment URLs are resolved asynchronously on native, so default to the
-+// production URLs until the lookups settle. Otherwise messages built at cold start
-+// render links with an "undefined" origin, which logs "Error parsing URL" when parsed.
-+let environmentURL: string = CONST.NEW_EXPENSIFY_URL;
++// The environment URLs are resolved asynchronously on native, so seed them synchronously from the build config instead
++// of defaulting to production: development and adhoc builds link to their own origin from the first render, while store
++// builds still fall back to production until the lookups settle. Otherwise messages built at cold start render links
++// with an "undefined" origin, which logs "Error parsing URL" when parsed.
++let environmentURL: string = getCurrentEnvironmentURL();
  getEnvironmentURL().then((url: string) => (environmentURL = url));
  
 -let oldDotEnvironmentURL: string;
-+let oldDotEnvironmentURL: string = CONST.EXPENSIFY_URL;
++let oldDotEnvironmentURL: string = getCurrentOldDotEnvironmentURL();
  getOldDotEnvironmentURL().then((url: string) => (oldDotEnvironmentURL = url));
  
  /*
 diff --git a/src/libs/ReportUtils.ts b/src/libs/ReportUtils.ts
-index 680f168f..1a803a4a 100644
+index 680f168f..f897542c 100644
 --- a/src/libs/ReportUtils.ts
 +++ b/src/libs/ReportUtils.ts
-@@ -1079,7 +1079,10 @@ let deprecatedCurrentUserPrivateDomain: string | undefined;
+@@ -119,7 +119,7 @@ import {isCardWithPotentialFraud} from './CardUtils';
+ import {getCategoryGLCode} from './CategoryUtils';
+ import {convertToDisplayStringEnLocale} from './CurrencyUtils';
+ import DateUtils from './DateUtils';
+-import {getEnvironmentURL} from './Environment/Environment';
++import {getCurrentEnvironmentURL, getEnvironmentURL} from './Environment/Environment';
+ import {getMicroSecondOnyxErrorWithTranslationKey, isReceiptError} from './ErrorUtils';
+ import getAttachmentDetails from './fileDownload/getAttachmentDetails';
+ import getBankAccountLastFourDigits from './getBankAccountLastFourDigits';
+@@ -1079,7 +1079,11 @@ let deprecatedCurrentUserPrivateDomain: string | undefined;
  let deprecatedCurrentUserAccountID: number | undefined;
  let deprecatedIsAnonymousUser = false;
  
 -let environmentURL: string;
-+// The environment URL is resolved asynchronously on native, so default to the production
-+// URL until the lookup settles. Otherwise messages built at cold start render links with
-+// an "undefined" origin, which logs "Error parsing URL" when parsed.
-+let environmentURL: string = CONST.NEW_EXPENSIFY_URL;
++// The environment URL is resolved asynchronously on native, so seed it synchronously from the build config instead of
++// defaulting to production: development and adhoc builds link to their own origin from the first render, while store
++// builds still fall back to production until the lookup settles. Otherwise messages built at cold start render links
++// with an "undefined" origin, which logs "Error parsing URL" when parsed.
++let environmentURL: string = getCurrentEnvironmentURL();
  getEnvironmentURL().then((url: string) => (environmentURL = url));
  
  /**
 diff --git a/tests/unit/EnvironmentURLRaceTest.ts b/tests/unit/EnvironmentURLRaceTest.ts
 new file mode 100644
-index 00000000..98256654
+index 00000000..eb652a1c
 --- /dev/null
 +++ b/tests/unit/EnvironmentURLRaceTest.ts
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,275 @@
++import CONFIG from '@src/CONFIG';
 +import CONST from '@src/CONST';
 +import type {ReportAction} from '@src/types/onyx';
 +
 +import type {LocalizedTranslate} from '@components/LocaleContextProvider';
++import type * as EnvironmentModule from '@libs/Environment/Environment';
 +
 +// On native, getEnvironment() waits on the betaChecker bridge before it resolves, so at
 +// cold start the module-level environment URLs are still unset while report actions render.
@@ -90,9 +180,21 @@ index 00000000..98256654
 +let resolveOldDotEnvironmentURL: (url: string) => void;
 +let oldDotEnvironmentURLPromise: Promise<string>;
 +
++// The synchronous seed the four library files read at module load. Tests set these before
++// loading the modules, to stand in for the build config of a dev build or a store build.
++let syncEnvironmentURL = CONST.NEW_EXPENSIFY_URL;
++let syncOldDotEnvironmentURL = CONST.EXPENSIFY_URL;
++
 +// The modules under test are re-required from a fresh registry, so their translate lookup
 +// has no locale loaded; a stub that echoes the parameters keeps the assertions on the URL.
 +const translateStub = ((key: string, ...params: Array<string | number | boolean>) => `${key}::${params.join('|')}`) as unknown as LocalizedTranslate;
++
++// The integration sync failed action every oldDot link test builds its message from. The message builders only read
++// it, so one shared action keeps the three tests on the same input.
++const integrationSyncFailedAction = {
++    actionName: CONST.REPORT.ACTIONS.TYPE.INTEGRATION_SYNC_FAILED,
++    originalMessage: {label: 'QuickBooks Online', errorMessage: 'Sync failed', recurrenceCount: 1},
++} as unknown as ReportAction;
 +
 +type ModulesUnderTest = {
 +    getReportURLForCurrentContext: (reportID: string | undefined) => string;
@@ -111,6 +213,8 @@ index 00000000..98256654
 +    jest.doMock('@libs/Environment/Environment', () => ({
 +        getEnvironmentURL: () => environmentURLPromise,
 +        getOldDotEnvironmentURL: () => oldDotEnvironmentURLPromise,
++        getCurrentEnvironmentURL: () => syncEnvironmentURL,
++        getCurrentOldDotEnvironmentURL: () => syncOldDotEnvironmentURL,
 +        getOldDotURLFromEnvironment: () => CONST.EXPENSIFY_URL,
 +        isDevelopment: () => false,
 +        isProduction: () => Promise.resolve(false),
@@ -135,6 +239,8 @@ index 00000000..98256654
 +    afterEach(() => {
 +        jest.resetModules();
 +        jest.dontMock('@libs/Environment/Environment');
++        syncEnvironmentURL = CONST.NEW_EXPENSIFY_URL;
++        syncOldDotEnvironmentURL = CONST.EXPENSIFY_URL;
 +    });
 +
 +    it('should build a valid report URL while the environment lookup is still pending', () => {
@@ -164,13 +270,9 @@ index 00000000..98256654
 +    it('should build a valid oldDot link while the environment lookup is still pending', () => {
 +        // Given the environment lookup has not resolved yet (cold start on native)
 +        const {getIntegrationSyncFailedMessage} = loadModulesWithPendingEnvironment();
-+        const action = {
-+            actionName: CONST.REPORT.ACTIONS.TYPE.INTEGRATION_SYNC_FAILED,
-+            originalMessage: {label: 'QuickBooks Online', errorMessage: 'Sync failed', recurrenceCount: 1},
-+        } as unknown as ReportAction;
 +
 +        // When the integration sync failed message is built with an oldDot link
-+        const message = getIntegrationSyncFailedMessage(translateStub, action, 'ABC123', true);
++        const message = getIntegrationSyncFailedMessage(translateStub, integrationSyncFailedAction, 'ABC123', true);
 +
 +        // Then the link is rooted at the production oldDot URL instead of "undefined/policy..."
 +        expect(message).toContain(`${CONST.EXPENSIFY_URL}/policy?param=`);
@@ -178,9 +280,14 @@ index 00000000..98256654
 +    });
 +
 +    it('should use the resolved environment URL once the lookup settles', async () => {
-+        // Given the environment lookup is pending at first
-+        const {getReportURLForCurrentContext} = loadModulesWithPendingEnvironment();
++        // Given the environment lookup is pending at first on a store build, seeded with production. This is the
++        // TestFlight case: staging and production ship the same binary, so only the beta check can tell them apart,
++        // and the async lookup is what corrects the seed to staging once it resolves.
++        const {getReportURLForCurrentContext, getIntegrationSyncFailedMessage} = loadModulesWithPendingEnvironment();
 +        expect(getReportURLForCurrentContext('67890')).toBe(`${CONST.NEW_EXPENSIFY_URL}/r/67890`);
++        expect(getIntegrationSyncFailedMessage(translateStub, integrationSyncFailedAction, 'ABC123', true)).toContain(
++            `${CONST.EXPENSIFY_URL}/policy?param=`,
++        );
 +
 +        // When the lookup resolves to the staging URL
 +        resolveEnvironmentURL(CONST.STAGING_NEW_EXPENSIFY_URL);
@@ -188,7 +295,148 @@ index 00000000..98256654
 +        await environmentURLPromise;
 +        await oldDotEnvironmentURLPromise;
 +
-+        // Then later URLs use the resolved environment URL
++        // Then later URLs use the resolved environment URL, for both the newDot and the oldDot links
 +        expect(getReportURLForCurrentContext('67890')).toBe(`${CONST.STAGING_NEW_EXPENSIFY_URL}/r/67890`);
++        expect(getIntegrationSyncFailedMessage(translateStub, integrationSyncFailedAction, 'ABC123', true)).toContain(
++            `${CONST.STAGING_EXPENSIFY_URL}/policy?param=`,
++        );
++    });
++
++    it('should seed a dev build link whose origin equals the live dev origin while the lookup is still pending', () => {
++        // Given a development build, whose synchronous seed comes from the environment URL map, and the async
++        // lookup is still pending. openLink only navigates in-app when the href origin equals the live
++        // environment URL, so a production-seeded link on a dev build would open the browser to production.
++        syncEnvironmentURL = `${CONST.DEV_NEW_EXPENSIFY_URL}${CONFIG.DEV_PORT}`;
++        const {getReportURLForCurrentContext} = loadModulesWithPendingEnvironment();
++
++        // When the report URL is built for the held expense report
++        const reportURL = getReportURLForCurrentContext('67890');
++
++        // Then the built link origin equals the live dev origin, not the production origin
++        expect(new URL(reportURL).origin).toBe(new URL(`${CONST.DEV_NEW_EXPENSIFY_URL}${CONFIG.DEV_PORT}`).origin);
++        expect(new URL(reportURL).origin).not.toBe(new URL(CONST.NEW_EXPENSIFY_URL).origin);
++    });
++
++    it('should seed the report URL with the development URL on a dev build while the environment lookup is still pending', () => {
++        // Given a development build, whose synchronous seed is the dev URL, and the async lookup is still pending
++        syncEnvironmentURL = `${CONST.DEV_NEW_EXPENSIFY_URL}${CONFIG.DEV_PORT}`;
++        const {getReportURLForCurrentContext} = loadModulesWithPendingEnvironment();
++
++        // When the report URL is built for the held expense report
++        const reportURL = getReportURLForCurrentContext('67890');
++
++        // Then the URL is rooted at the dev origin, not at production, so a dev build never links to production
++        expect(reportURL).toBe(`${CONST.DEV_NEW_EXPENSIFY_URL}${CONFIG.DEV_PORT}/r/67890`);
++        expect(reportURL).not.toContain('undefined');
++    });
++
++    it('should seed the oldDot link with the development oldDot URL on a dev build while the environment lookup is still pending', () => {
++        // Given a development build, whose synchronous oldDot seed is the dev oldDot URL, and the async lookup is still pending
++        syncOldDotEnvironmentURL = CONST.INTERNAL_DEV_EXPENSIFY_URL;
++        const {getIntegrationSyncFailedMessage} = loadModulesWithPendingEnvironment();
++
++        // When the integration sync failed message is built with an oldDot link
++        const message = getIntegrationSyncFailedMessage(translateStub, integrationSyncFailedAction, 'ABC123', true);
++
++        // Then the link is rooted at the dev oldDot origin instead of the production oldDot origin
++        expect(message).toContain(`${CONST.INTERNAL_DEV_EXPENSIFY_URL}/policy?param=`);
++        expect(message).not.toContain('undefined/policy');
++    });
++
++    it('should fall back to the production URL on a store build while the environment lookup is still pending', () => {
++        // Given a store build, whose baked config is production: staging and production ship the same binary, so
++        // the beta check is the only signal that can tell them apart, and the async lookup is still pending
++        syncEnvironmentURL = CONST.NEW_EXPENSIFY_URL;
++        syncOldDotEnvironmentURL = CONST.EXPENSIFY_URL;
++        const {getReportURLForCurrentContext, getIntegrationSyncFailedMessage} = loadModulesWithPendingEnvironment();
++
++        // When report URLs are built before the lookup settles
++        const reportURL = getReportURLForCurrentContext('67890');
++        const message = getIntegrationSyncFailedMessage(translateStub, integrationSyncFailedAction, 'ABC123', true);
++
++        // Then both links use the production origins, matching EnvironmentContextProvider's default
++        expect(reportURL).toBe(`${CONST.NEW_EXPENSIFY_URL}/r/67890`);
++        expect(message).toContain(`${CONST.EXPENSIFY_URL}/policy?param=`);
++    });
++});
++
++describe('synchronous environment URL getters', () => {
++    // The build config value the real Environment module reads. Each test sets it before
++    // requiring the module from a fresh registry, so the getter under test sees that build.
++    let mockConfigEnvironment = CONST.ENVIRONMENT.DEV;
++
++    function loadRealEnvironmentModule(): typeof EnvironmentModule {
++        jest.doMock('react-native-config', () => ({
++            __esModule: true,
++            default: {ENVIRONMENT: mockConfigEnvironment},
++        }));
++        jest.resetModules();
++
++        // eslint-disable-next-line @typescript-eslint/no-require-imports
++        return require<typeof EnvironmentModule>('@libs/Environment/Environment');
++    }
++
++    afterEach(() => {
++        jest.resetModules();
++        jest.dontMock('react-native-config');
++        jest.dontMock('@libs/Environment/Environment');
++        mockConfigEnvironment = CONST.ENVIRONMENT.DEV;
++    });
++
++    it('should return the development URLs for a development build', () => {
++        // Given a development build config
++        mockConfigEnvironment = CONST.ENVIRONMENT.DEV;
++        const {getCurrentEnvironmentURL, getCurrentOldDotEnvironmentURL} = loadRealEnvironmentModule();
++
++        // When the synchronous getters are called
++        // Then they return the dev origins, including the dev port
++        expect(getCurrentEnvironmentURL()).toBe(`${CONST.DEV_NEW_EXPENSIFY_URL}${CONFIG.DEV_PORT}`);
++        expect(getCurrentOldDotEnvironmentURL()).toBe(CONST.INTERNAL_DEV_EXPENSIFY_URL);
++    });
++
++    it('should return the staging URLs for an adhoc build', () => {
++        // Given an adhoc build config, which always resolves to staging
++        mockConfigEnvironment = CONST.ENVIRONMENT.ADHOC;
++        const {getCurrentEnvironmentURL, getCurrentOldDotEnvironmentURL} = loadRealEnvironmentModule();
++
++        // When the synchronous getters are called
++        // Then they return the staging origins
++        expect(getCurrentEnvironmentURL()).toBe(CONST.STAGING_NEW_EXPENSIFY_URL);
++        expect(getCurrentOldDotEnvironmentURL()).toBe(CONST.STAGING_EXPENSIFY_URL);
++    });
++
++    it('should return the production URLs for a production build', () => {
++        // Given a production build config
++        mockConfigEnvironment = CONST.ENVIRONMENT.PRODUCTION;
++        const {getCurrentEnvironmentURL, getCurrentOldDotEnvironmentURL} = loadRealEnvironmentModule();
++
++        // When the synchronous getters are called
++        // Then they return the production origins
++        expect(getCurrentEnvironmentURL()).toBe(CONST.NEW_EXPENSIFY_URL);
++        expect(getCurrentOldDotEnvironmentURL()).toBe(CONST.EXPENSIFY_URL);
++    });
++
++    it('should return the staging URLs for a staging build', () => {
++        // Given a staging build config: on web the async lookup returns staging straight from the config, and no
++        // native flavor bakes ENVIRONMENT=staging, so the map value is the live URL either way
++        mockConfigEnvironment = CONST.ENVIRONMENT.STAGING;
++        const {getCurrentEnvironmentURL, getCurrentOldDotEnvironmentURL} = loadRealEnvironmentModule();
++
++        // When the synchronous getters are called
++        // Then they return the staging origins
++        expect(getCurrentEnvironmentURL()).toBe(CONST.STAGING_NEW_EXPENSIFY_URL);
++        expect(getCurrentOldDotEnvironmentURL()).toBe(CONST.STAGING_EXPENSIFY_URL);
++    });
++
++    it('should return the QA URLs for a QA build', () => {
++        // Given a QA build config: on web the async lookup returns QA straight from the config, and no native
++        // flavor bakes ENVIRONMENT=qa, so the map value is the live URL either way
++        mockConfigEnvironment = CONST.ENVIRONMENT.QA;
++        const {getCurrentEnvironmentURL, getCurrentOldDotEnvironmentURL} = loadRealEnvironmentModule();
++
++        // When the synchronous getters are called
++        // Then they return the QA origins
++        expect(getCurrentEnvironmentURL()).toBe(CONST.QA_NEW_EXPENSIFY_URL);
++        expect(getCurrentOldDotEnvironmentURL()).toBe(CONST.QA_EXPENSIFY_URL);
 +    });
 +});
