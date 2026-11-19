@@ -83,7 +83,7 @@ definitions:
           xcrun simctl install "$phone" "$app_path"
           developer_dir="$(xcode-select -p)"
           device_hub="$(dirname "$developer_dir")/Applications/DeviceHub.app"
-          open -a "$device_hub" "devices://device/open?id=$phone"
+          open -a "$device_hub" "devices://device/open?id=$phone" || true
           start_packager repack.log
           xcrun simctl launch "$phone" "$app_id"
 
