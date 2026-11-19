@@ -1,0 +1,194 @@
+diff --git a/src/libs/ModifiedExpenseMessage.ts b/src/libs/ModifiedExpenseMessage.ts
+index 3f5f7668..f2dc1859 100644
+--- a/src/libs/ModifiedExpenseMessage.ts
++++ b/src/libs/ModifiedExpenseMessage.ts
+@@ -26,7 +26,10 @@ import {getPolicyName, getRootParentReport, isPolicyExpenseChat, isSelfDM} from
+ import {getFormattedAttendees, getTagArrayFromName} from './TransactionUtils';
+ import {isInvalidMerchantValue} from './ValidationUtils';
+ 
+-let environmentURL: string;
++// The environment URL is resolved asynchronously on native, so default to the production
++// URL until the lookup settles. Otherwise messages built at cold start render links with
++// an "undefined" origin, which logs "Error parsing URL" when parsed.
++let environmentURL: string = CONST.NEW_EXPENSIFY_URL;
+ getEnvironmentURL().then((url: string) => (environmentURL = url));
+ 
+ /**
+diff --git a/src/libs/Navigation/helpers/getReportURLForCurrentContext.ts b/src/libs/Navigation/helpers/getReportURLForCurrentContext.ts
+index ec2670b0..e8f3c9ff 100644
+--- a/src/libs/Navigation/helpers/getReportURLForCurrentContext.ts
++++ b/src/libs/Navigation/helpers/getReportURLForCurrentContext.ts
+@@ -1,11 +1,15 @@
+ import {getEnvironmentURL} from '@libs/Environment/Environment';
+ import Navigation from '@libs/Navigation/Navigation';
+ 
++import CONST from '@src/CONST';
+ import ROUTES from '@src/ROUTES';
+ 
+ import isSearchTopmostFullScreenRoute from './isSearchTopmostFullScreenRoute';
+ 
+-let environmentURL: string;
++// The environment URL is resolved asynchronously on native, so default to the production
++// URL until the lookup settles. Otherwise report links built at cold start render with
++// an "undefined" origin, which logs "Error parsing URL" when the message HTML is parsed.
++let environmentURL: string = CONST.NEW_EXPENSIFY_URL;
+ getEnvironmentURL().then((url: string) => (environmentURL = url));
+ 
+ // Static part of the search report path (everything before the first route param), used to detect sibling search-report routes.
+diff --git a/src/libs/ReportActionsUtils.ts b/src/libs/ReportActionsUtils.ts
+index 606d93c3..e90ff27c 100644
+--- a/src/libs/ReportActionsUtils.ts
++++ b/src/libs/ReportActionsUtils.ts
+@@ -172,10 +172,13 @@ Onyx.connectWithoutView({
+     },
+ });
+ 
+-let environmentURL: string;
++// The environment URLs are resolved asynchronously on native, so default to the
++// production URLs until the lookups settle. Otherwise messages built at cold start
++// render links with an "undefined" origin, which logs "Error parsing URL" when parsed.
++let environmentURL: string = CONST.NEW_EXPENSIFY_URL;
+ getEnvironmentURL().then((url: string) => (environmentURL = url));
+ 
+-let oldDotEnvironmentURL: string;
++let oldDotEnvironmentURL: string = CONST.EXPENSIFY_URL;
+ getOldDotEnvironmentURL().then((url: string) => (oldDotEnvironmentURL = url));
+ 
+ /*
+diff --git a/src/libs/ReportUtils.ts b/src/libs/ReportUtils.ts
+index 680f168f..1a803a4a 100644
+--- a/src/libs/ReportUtils.ts
++++ b/src/libs/ReportUtils.ts
+@@ -1079,7 +1079,10 @@ let deprecatedCurrentUserPrivateDomain: string | undefined;
+ let deprecatedCurrentUserAccountID: number | undefined;
+ let deprecatedIsAnonymousUser = false;
+ 
+-let environmentURL: string;
++// The environment URL is resolved asynchronously on native, so default to the production
++// URL until the lookup settles. Otherwise messages built at cold start render links with
++// an "undefined" origin, which logs "Error parsing URL" when parsed.
++let environmentURL: string = CONST.NEW_EXPENSIFY_URL;
+ getEnvironmentURL().then((url: string) => (environmentURL = url));
+ 
+ /**
+diff --git a/tests/unit/EnvironmentURLRaceTest.ts b/tests/unit/EnvironmentURLRaceTest.ts
+new file mode 100644
+index 00000000..98256654
+--- /dev/null
++++ b/tests/unit/EnvironmentURLRaceTest.ts
+@@ -0,0 +1,115 @@
++import CONST from '@src/CONST';
++import type {ReportAction} from '@src/types/onyx';
++
++import type {LocalizedTranslate} from '@components/LocaleContextProvider';
++
++// On native, getEnvironment() waits on the betaChecker bridge before it resolves, so at
++// cold start the module-level environment URLs are still unset while report actions render.
++// These deferred promises hold the environment lookup pending to reproduce that race.
++let resolveEnvironmentURL: (url: string) => void;
++let environmentURLPromise: Promise<string>;
++let resolveOldDotEnvironmentURL: (url: string) => void;
++let oldDotEnvironmentURLPromise: Promise<string>;
++
++// The modules under test are re-required from a fresh registry, so their translate lookup
++// has no locale loaded; a stub that echoes the parameters keeps the assertions on the URL.
++const translateStub = ((key: string, ...params: Array<string | number | boolean>) => `${key}::${params.join('|')}`) as unknown as LocalizedTranslate;
++
++type ModulesUnderTest = {
++    getReportURLForCurrentContext: (reportID: string | undefined) => string;
++    getCreatedReportForUnapprovedTransactionsMessage: (reportID: string | undefined, reportName: string, isReportDeleted: boolean, translate: LocalizedTranslate) => string;
++    getIntegrationSyncFailedMessage: (translate: LocalizedTranslate, action: ReportAction, policyID?: string, shouldShowOldDotLink?: boolean) => string;
++};
++
++function loadModulesWithPendingEnvironment(): ModulesUnderTest {
++    environmentURLPromise = new Promise<string>((resolve) => {
++        resolveEnvironmentURL = resolve;
++    });
++    oldDotEnvironmentURLPromise = new Promise<string>((resolve) => {
++        resolveOldDotEnvironmentURL = resolve;
++    });
++
++    jest.doMock('@libs/Environment/Environment', () => ({
++        getEnvironmentURL: () => environmentURLPromise,
++        getOldDotEnvironmentURL: () => oldDotEnvironmentURLPromise,
++        getOldDotURLFromEnvironment: () => CONST.EXPENSIFY_URL,
++        isDevelopment: () => false,
++        isProduction: () => Promise.resolve(false),
++        isInternalTestBuild: () => false,
++    }));
++
++    jest.resetModules();
++
++    // eslint-disable-next-line @typescript-eslint/no-require-imports
++    const getReportURLForCurrentContext = require('@libs/Navigation/helpers/getReportURLForCurrentContext').default as ModulesUnderTest['getReportURLForCurrentContext'];
++    // eslint-disable-next-line @typescript-eslint/no-require-imports
++    const ReportActionsUtils = require('@libs/ReportActionsUtils') as ModulesUnderTest;
++
++    return {
++        getReportURLForCurrentContext,
++        getCreatedReportForUnapprovedTransactionsMessage: ReportActionsUtils.getCreatedReportForUnapprovedTransactionsMessage,
++        getIntegrationSyncFailedMessage: ReportActionsUtils.getIntegrationSyncFailedMessage,
++    };
++}
++
++describe('environment URL cold-start race (issue #107179)', () => {
++    afterEach(() => {
++        jest.resetModules();
++        jest.dontMock('@libs/Environment/Environment');
++    });
++
++    it('should build a valid report URL while the environment lookup is still pending', () => {
++        // Given the environment lookup has not resolved yet (cold start on native)
++        const {getReportURLForCurrentContext} = loadModulesWithPendingEnvironment();
++
++        // When the report URL is built for the held expense report
++        const reportURL = getReportURLForCurrentContext('67890');
++
++        // Then the URL is rooted at the production default instead of "undefined/r/..."
++        expect(reportURL).toBe(`${CONST.NEW_EXPENSIFY_URL}/r/67890`);
++        expect(reportURL).not.toContain('undefined');
++    });
++
++    it('should render the held-expense system message without an "undefined" report link while the environment lookup is still pending', () => {
++        // Given the environment lookup has not resolved yet (cold start on native)
++        const {getCreatedReportForUnapprovedTransactionsMessage} = loadModulesWithPendingEnvironment();
++
++        // When the system message for the held expenses is built
++        const message = getCreatedReportForUnapprovedTransactionsMessage('67890', 'Original Report', false, translateStub);
++
++        // Then the message links to a valid report URL instead of "undefined/r/..."
++        expect(message).toContain(`${CONST.NEW_EXPENSIFY_URL}/r/67890`);
++        expect(message).not.toContain('undefined/r/');
++    });
++
++    it('should build a valid oldDot link while the environment lookup is still pending', () => {
++        // Given the environment lookup has not resolved yet (cold start on native)
++        const {getIntegrationSyncFailedMessage} = loadModulesWithPendingEnvironment();
++        const action = {
++            actionName: CONST.REPORT.ACTIONS.TYPE.INTEGRATION_SYNC_FAILED,
++            originalMessage: {label: 'QuickBooks Online', errorMessage: 'Sync failed', recurrenceCount: 1},
++        } as unknown as ReportAction;
++
++        // When the integration sync failed message is built with an oldDot link
++        const message = getIntegrationSyncFailedMessage(translateStub, action, 'ABC123', true);
++
++        // Then the link is rooted at the production oldDot URL instead of "undefined/policy..."
++        expect(message).toContain(`${CONST.EXPENSIFY_URL}/policy?param=`);
++        expect(message).not.toContain('undefined/policy');
++    });
++
++    it('should use the resolved environment URL once the lookup settles', async () => {
++        // Given the environment lookup is pending at first
++        const {getReportURLForCurrentContext} = loadModulesWithPendingEnvironment();
++        expect(getReportURLForCurrentContext('67890')).toBe(`${CONST.NEW_EXPENSIFY_URL}/r/67890`);
++
++        // When the lookup resolves to the staging URL
++        resolveEnvironmentURL(CONST.STAGING_NEW_EXPENSIFY_URL);
++        resolveOldDotEnvironmentURL(CONST.STAGING_EXPENSIFY_URL);
++        await environmentURLPromise;
++        await oldDotEnvironmentURLPromise;
++
++        // Then later URLs use the resolved environment URL
++        expect(getReportURLForCurrentContext('67890')).toBe(`${CONST.STAGING_NEW_EXPENSIFY_URL}/r/67890`);
++    });
++});

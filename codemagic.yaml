@@ -1,0 +1,156 @@
+definitions:
+  ios_video: &ios_video
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    scripts:
+      - name: Prepare the requested source variant
+        script: |
+          set -euo pipefail
+          git apply --check fix-107179.patch
+          if [ "$APPLY_FIX" = 1 ]; then
+            git apply fix-107179.patch
+          fi
+          git config --global url.https://github.com/.insteadOf ssh://git@github.com/
+          tooling="$(mktemp -d)"
+          npm install --prefix "$tooling" --no-audit --no-fund "bun@$(cat .bun-version)"
+          export PATH="$tooling/node_modules/.bin:$PATH"
+          bun --version
+          npm ci --workspaces=false
+      - name: Install CocoaPods dependencies
+        script: |
+          set -euo pipefail
+          if ! command -v yq >/dev/null; then brew install yq; fi
+          bundle install
+          npm run pod-install-standalone
+      - name: Build New Expensify for iPhone 17
+        script: |
+          set -euo pipefail
+          mkdir -p "$CM_BUILD_DIR/videos"
+          xcodebuild -workspace ios/NewExpensify.xcworkspace \
+            -scheme "New Expensify Dev" -configuration DebugDevelopment \
+            -destination "platform=iOS Simulator,name=iPhone 17,OS=27.0" \
+            -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO build | tee "$CM_BUILD_DIR/videos/xcodebuild.log"
+      - name: Seed the report action and record a cold launch
+        script: |
+          set -euo pipefail
+          app_id=com.expensify.chat.dev
+          phone="$(xcrun simctl list devices available -j |
+            jq -er '.devices["com.apple.CoreSimulator.SimRuntime.iOS-27-0"] | map(select(.name == "iPhone 17")) | first.udid')"
+          products="$CM_BUILD_DIR/DerivedData/Build/Products/DebugDevelopment-iphonesimulator"
+          app_path=""
+          for app in "$products"/*.app; do
+            [ -f "$app/Info.plist" ] || continue
+            bundle_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")"
+            if [ "$bundle_id" = "$app_id" ]; then app_path="$app"; break; fi
+          done
+          test -n "$app_path"
+
+          npx rock start --host 127.0.0.1 --port 8081 --platform ios --no-interactive > "$CM_BUILD_DIR/videos/repack.log" 2>&1 &
+          packager=$!
+          recorder=""
+          cleanup() {
+            if [ -n "$recorder" ]; then kill -INT "$recorder" 2>/dev/null || true; wait "$recorder" || true; fi
+            kill "$packager" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          xcrun simctl bootstatus "$phone" -b
+          xcrun simctl install "$phone" "$app_path"
+          open -a Simulator --args -CurrentDeviceUDID "$phone"
+          curl --fail --silent --show-error --retry 40 --retry-connrefused --retry-delay 2 --max-time 8 \
+            http://127.0.0.1:8081/status > /dev/null
+          xcrun simctl launch "$phone" "$app_id"
+
+          data_dir="$(xcrun simctl get_app_container "$phone" "$app_id" data)"
+          echo "Sign in to Expensify in the Simulator via Codemagic remote access."
+          mkdir -p "$CM_BUILD_DIR/videos"
+          db=""
+          for attempt in $(seq 1 108); do
+            db="$(find "$data_dir" -type f -name OnyxDB -print -quit)"
+            if [ -n "$db" ] && [ "$(sqlite3 -readonly "$db" "
+                SELECT COUNT(*) FROM keyvaluepairs ids
+                JOIN keyvaluepairs r ON r.record_key='report_' || json_extract(ids.valueJSON,'$')
+                WHERE ids.record_key IN ('selfDMReportID','conciergeReportID');
+              " 2>/dev/null || true)" = 2 ]; then
+              break
+            fi
+            db=""
+            sleep 5
+          done
+          test -n "$db"
+          xcrun simctl terminate "$phone" "$app_id"
+          sqlite3 -bail "$db" <<'SQL'
+          BEGIN IMMEDIATE;
+          CREATE TEMP TABLE scenario AS
+          SELECT json_extract(source.valueJSON,'$') AS source_id,
+                 json_extract(target.valueJSON,'$') AS target_id,
+                 json_extract(session.valueJSON,'$.accountID') AS actor_id
+          FROM keyvaluepairs source, keyvaluepairs target, keyvaluepairs session
+          WHERE source.record_key='selfDMReportID' AND target.record_key='conciergeReportID'
+            AND session.record_key='session';
+          INSERT INTO keyvaluepairs(record_key,valueJSON)
+          SELECT 'reportActions_' || source_id,
+            json_object('107179900001',json_object(
+              'reportActionID','107179900001',
+              'actionName','CREATEDREPORTFORUNAPPROVEDTRANSACTIONS',
+              'actorAccountID',actor_id,
+              'created',strftime('%Y-%m-%d %H:%M:%f','now'),
+              'message',json('[]'),
+              'originalMessage',json_object('originalID',target_id)
+            ))
+          FROM scenario WHERE source_id<>target_id
+          ON CONFLICT(record_key) DO UPDATE SET valueJSON=json_patch(keyvaluepairs.valueJSON,excluded.valueJSON);
+          INSERT INTO keyvaluepairs(record_key,valueJSON)
+          SELECT 'lastVisitedPath', json_quote('/r/' || source_id) FROM scenario WHERE source_id<>target_id
+          ON CONFLICT(record_key) DO UPDATE SET valueJSON=excluded.valueJSON;
+          COMMIT;
+          SQL
+
+          video="$CM_BUILD_DIR/videos/$VIDEO_NAME"
+          xcrun simctl io "$phone" recordVideo --codec=h264 "$video" &
+          recorder=$!
+          sleep 2
+          xcrun simctl launch "$phone" "$app_id"
+          if [ "$APPLY_FIX" = 0 ]; then
+            echo "In the Simulator, open LogBox to show the full malformed URL."
+          else
+            echo "In the Simulator, tap the held-expense message link and show the destination."
+          fi
+          echo "When the observed result is visible in the recording, run: touch \"$CM_BUILD_DIR/finish-107179\""
+          for attempt in $(seq 1 72); do
+            if [ -f "$CM_BUILD_DIR/finish-107179" ]; then break; fi
+            sleep 5
+          done
+          kill -INT "$recorder"
+          wait "$recorder" || true
+          recorder=""
+          test -s "$video"
+          test -f "$CM_BUILD_DIR/finish-107179"
+    artifacts:
+      - videos/*.mp4
+      - videos/*.log
+  ios_environment: &ios_environment
+    xcode: '27.1'
+    node: '26.12.1'
+    ruby: '3.4.1'
+
+workflows:
+  expensify-ios-before:
+    <<: *ios_video
+    name: Expensify iOS 107179 before
+    environment:
+      <<: *ios_environment
+      vars:
+        STANDALONE_NEW_DOT: 'true'
+        APPLY_FIX: '0'
+        VIDEO_NAME: 107179-before-ios.mp4
+  expensify-ios-after:
+    <<: *ios_video
+    name: Expensify iOS 107179 after
+    environment:
+      <<: *ios_environment
+      vars:
+        STANDALONE_NEW_DOT: 'true'
+        APPLY_FIX: '1'
+        VIDEO_NAME: 107179-after-ios.mp4
