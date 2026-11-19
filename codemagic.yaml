@@ -198,7 +198,7 @@ workflows:
     <<: *ios_video
     name: Expensify iOS 107179 paired capture
     environment:
-      <<: *ios_environment
+      xcode: '27.1'
       vars:
         STANDALONE_NEW_DOT: 'true'
         APPLY_FIX: '0'
