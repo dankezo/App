@@ -11,20 +11,35 @@ definitions:
             git apply fix-107179.patch
           fi
           git config --global url.https://github.com/.insteadOf ssh://git@github.com/
-          tooling="$(mktemp -d)"
+          tooling="$CM_BUILD_DIR/.ci-tooling"
+          node_version="$(cat .nvmrc)"
+          node_archive="node-v$node_version-darwin-arm64.tar.gz"
+          node_dist="https://nodejs.org/dist/v$node_version"
+          mkdir -p "$tooling/node"
+          (
+            cd "$tooling"
+            curl -fsSLO "$node_dist/$node_archive"
+            curl -fsS "$node_dist/SHASUMS256.txt" | grep -F "  $node_archive" > node.sha256
+            shasum -a 256 -c node.sha256
+            tar -xzf "$node_archive" -C node --strip-components=1
+          )
+          export PATH="$tooling/node/bin:$tooling/node_modules/.bin:$PATH"
+          node --version
+          npm --version
           npm install --prefix "$tooling" --no-audit --no-fund "bun@$(cat .bun-version)"
-          export PATH="$tooling/node_modules/.bin:$PATH"
           bun --version
           npm ci --workspaces=false
       - name: Install CocoaPods dependencies
         script: |
           set -euo pipefail
+          export PATH="$CM_BUILD_DIR/.ci-tooling/node/bin:$CM_BUILD_DIR/.ci-tooling/node_modules/.bin:$PATH"
           if ! command -v yq >/dev/null; then brew install yq; fi
           bundle install
           npm run pod-install-standalone
       - name: Build New Expensify for iPhone 17
         script: |
           set -euo pipefail
+          export PATH="$CM_BUILD_DIR/.ci-tooling/node/bin:$CM_BUILD_DIR/.ci-tooling/node_modules/.bin:$PATH"
           mkdir -p "$CM_BUILD_DIR/videos"
           xcodebuild -workspace ios/NewExpensify.xcworkspace \
             -scheme "New Expensify Dev" -configuration DebugDevelopment \
@@ -34,6 +49,7 @@ definitions:
       - name: Seed the report action and record a cold launch
         script: |
           set -euo pipefail
+          export PATH="$CM_BUILD_DIR/.ci-tooling/node/bin:$CM_BUILD_DIR/.ci-tooling/node_modules/.bin:$PATH"
           app_id=com.expensify.chat.dev
           phone="$(xcrun simctl list devices available -j |
             jq -er '.devices["com.apple.CoreSimulator.SimRuntime.iOS-27-0"] | map(select(.name == "iPhone 17")) | first.udid')"
@@ -132,7 +148,6 @@ definitions:
       - videos/*.log
   ios_environment: &ios_environment
     xcode: '27.1'
-    node: '26.12.1'
     ruby: '3.4.1'
 
 workflows:
