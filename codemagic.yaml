@@ -73,7 +73,9 @@ definitions:
 
           xcrun simctl bootstatus "$phone" -b
           xcrun simctl install "$phone" "$app_path"
-          open -a Simulator --args -CurrentDeviceUDID "$phone"
+          developer_dir="$(xcode-select -p)"
+          device_hub="$(dirname "$developer_dir")/Applications/DeviceHub.app"
+          open -a "$device_hub" "devices://device/open?id=$phone"
           curl --fail --silent --show-error --retry 40 --retry-connrefused --retry-delay 2 --max-time 8 \
             http://127.0.0.1:8081/status > /dev/null
           xcrun simctl launch "$phone" "$app_id"
