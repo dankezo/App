@@ -3,7 +3,8 @@ definitions:
     instance_type: mac_mini_m2
     max_build_duration: 120
     scripts:
-      - name: Prepare the requested source variant
+      - &prepare_source
+        name: Prepare the requested source variant
         script: |
           set -euo pipefail
           git apply --check fix-107179.patch
@@ -46,7 +47,8 @@ definitions:
             -destination "platform=iOS Simulator,name=iPhone 17,OS=27.0" \
             -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
             CODE_SIGNING_ALLOWED=NO build | tee "$CM_BUILD_DIR/videos/xcodebuild.log"
-      - name: Seed the report action and record a cold launch
+      - &capture_ios
+        name: Seed the report action and record a cold launch
         script: |
           set -euo pipefail
           export PATH="$CM_BUILD_DIR/.ci-tooling/node/bin:$CM_BUILD_DIR/.ci-tooling/node_modules/.bin:$PATH"
@@ -62,22 +64,27 @@ definitions:
           done
           test -n "$app_path"
 
-          npx rock start --host 127.0.0.1 --port 8081 --platform ios --no-interactive > "$CM_BUILD_DIR/videos/repack.log" 2>&1 &
-          packager=$!
           recorder=""
+          packager=""
           cleanup() {
             if [ -n "$recorder" ]; then kill -INT "$recorder" 2>/dev/null || true; wait "$recorder" || true; fi
-            kill "$packager" 2>/dev/null || true
+            if [ -n "$packager" ]; then kill "$packager" 2>/dev/null || true; wait "$packager" || true; fi
           }
           trap cleanup EXIT
+          start_packager() {
+            node node_modules/rock/dist/src/bin.js start --host 127.0.0.1 --port 8081 --platform ios --no-interactive \
+              > "$CM_BUILD_DIR/videos/$1" 2>&1 &
+            packager=$!
+            curl --fail --silent --show-error --retry 40 --retry-connrefused --retry-delay 2 --max-time 8 \
+              http://127.0.0.1:8081/status > /dev/null
+          }
 
           xcrun simctl bootstatus "$phone" -b
           xcrun simctl install "$phone" "$app_path"
           developer_dir="$(xcode-select -p)"
           device_hub="$(dirname "$developer_dir")/Applications/DeviceHub.app"
           open -a "$device_hub" "devices://device/open?id=$phone"
-          curl --fail --silent --show-error --retry 40 --retry-connrefused --retry-delay 2 --max-time 8 \
-            http://127.0.0.1:8081/status > /dev/null
+          start_packager repack.log
           xcrun simctl launch "$phone" "$app_id"
 
           data_dir="$(xcrun simctl get_app_container "$phone" "$app_id" data)"
@@ -125,26 +132,42 @@ definitions:
           COMMIT;
           SQL
 
-          video="$CM_BUILD_DIR/videos/$VIDEO_NAME"
-          xcrun simctl io "$phone" recordVideo --codec=h264 "$video" &
-          recorder=$!
-          sleep 2
-          xcrun simctl launch "$phone" "$app_id"
-          if [ "$APPLY_FIX" = 0 ]; then
-            echo "In the Simulator, open LogBox to show the full malformed URL."
+          record_launch() {
+            local video="$CM_BUILD_DIR/videos/$1"
+            local marker="$CM_BUILD_DIR/$2"
+            local instruction="$3"
+            xcrun simctl io "$phone" recordVideo --codec=h264 "$video" &
+            recorder=$!
+            sleep 2
+            xcrun simctl launch "$phone" "$app_id"
+            echo "$instruction"
+            echo "When the observed result is visible in the recording, run: touch \"$marker\""
+            for attempt in $(seq 1 72); do
+              if [ -f "$marker" ]; then break; fi
+              sleep 5
+            done
+            kill -INT "$recorder"
+            wait "$recorder" || true
+            recorder=""
+            test -s "$video"
+            test -f "$marker"
+          }
+          before_instruction="In the Simulator, open LogBox to show the full malformed URL."
+          after_instruction="In the Simulator, tap the held-expense message link and show the destination."
+          if [ "$APPLY_FIX" = 1 ]; then
+            record_launch "$VIDEO_NAME" finish-107179 "$after_instruction"
           else
-            echo "In the Simulator, tap the held-expense message link and show the destination."
+            record_launch "$VIDEO_NAME" finish-107179 "$before_instruction"
           fi
-          echo "When the observed result is visible in the recording, run: touch \"$CM_BUILD_DIR/finish-107179\""
-          for attempt in $(seq 1 72); do
-            if [ -f "$CM_BUILD_DIR/finish-107179" ]; then break; fi
-            sleep 5
-          done
-          kill -INT "$recorder"
-          wait "$recorder" || true
-          recorder=""
-          test -s "$video"
-          test -f "$CM_BUILD_DIR/finish-107179"
+          if [ "${CAPTURE_PAIR:-0}" = 1 ]; then
+            xcrun simctl terminate "$phone" "$app_id"
+            kill "$packager"
+            wait "$packager" || true
+            packager=""
+            git apply fix-107179.patch
+            start_packager repack-after.log
+            record_launch 107179-after-ios.mp4 finish-107179-after "$after_instruction"
+          fi
     artifacts:
       - videos/*.mp4
       - videos/*.log
@@ -171,3 +194,27 @@ workflows:
         STANDALONE_NEW_DOT: 'true'
         APPLY_FIX: '1'
         VIDEO_NAME: 107179-after-ios.mp4
+  expensify-ios-capture-pair:
+    <<: *ios_video
+    name: Expensify iOS 107179 paired capture
+    environment:
+      <<: *ios_environment
+      vars:
+        STANDALONE_NEW_DOT: 'true'
+        APPLY_FIX: '0'
+        CAPTURE_PAIR: '1'
+        VIDEO_NAME: 107179-before-ios.mp4
+    scripts:
+      - *prepare_source
+      - name: Install the official CI simulator build for the base commit
+        script: |
+          set -euo pipefail
+          # Expensify/App run 43805244211, New Expensify Dev / DebugDevelopment / standalone.
+          products="$CM_BUILD_DIR/DerivedData/Build/Products/DebugDevelopment-iphonesimulator"
+          native="$CM_BUILD_DIR/.ci-tooling/native"
+          archive_url=https://ad-hoc-expensify-cash.s3.us-east-1.amazonaws.com/rock-artifacts/rock-ios-simulator-DebugDevelopment-c837462841f7ac56bb0bd4b60e375568c4e49479.zip
+          mkdir -p "$native" "$products" "$CM_BUILD_DIR/videos"
+          curl -fsSL --retry 3 --output "$native/simulator.zip" "$archive_url"
+          unzip -q "$native/simulator.zip" -d "$native"
+          tar -xzf "$native/app.tar.gz" -C "$products"
+      - *capture_ios
